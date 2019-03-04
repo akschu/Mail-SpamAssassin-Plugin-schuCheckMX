@@ -1,0 +1,12 @@
+loadplugin Mail::SpamAssassin::Plugin::schuCheckMX  /etc/mail/spamassassin/schuCheckMX/schuCheckMX.pm
+
+header          SCHUCHECKMX_MXRECORD eval:schucheckmx_ismx()
+describe        SCHUCHECKMX_MXRECORD Didn't find an MX record for the recipient domain.
+tflags          SCHUCHECKMX_MXRECORD net
+score           SCHUCHECKMX_MXRECORD 0.5
+
+header          SCHUCHECKMX_SMTPPING eval:schucheckmx_smtpping()
+describe        SCHUCHECKMX_SMTPPING The recipient domain isn't listening on port 25.
+tflags          SCHUCHECKMX_SMTPPING net
+score           SCHUCHECKMX_SMTPPING 2.5
+
