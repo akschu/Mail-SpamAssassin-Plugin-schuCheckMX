@@ -4,8 +4,8 @@
 
 schuCheckMX is a spamassassin plugin that looks for two things:
 
-1.  Does the ingress message have a from or reply-to header, and if so, does the domain in that address have an MX record?
-2.  Does the this same domain also have an SMTP server listening?
+1.  Does the ingress message have a from or return-path or from header, and if so, does the domain in that address have an MX record?
+2.  Does this same domain also have an SMTP server listening?
 
 The idea is that you wouldn't want to get email from someone you can't reply to.
 
