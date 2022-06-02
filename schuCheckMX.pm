@@ -14,7 +14,7 @@ use vars qw(@ISA);
 my $driver   = "SQLite";
 my $database = "/etc/mail/spamassassin/schuCheckMX/schuCheckMX.db";
 my $dsn = "DBI:$driver:dbname=$database";
-our $HELO = 'smtp.domain.com';
+our $HELO = 'ssl.schu.net';
 
 @ISA = qw(Mail::SpamAssassin::Plugin);
 
@@ -40,6 +40,7 @@ sub new {
 
 sub schucheckmx_ismx {
   my ($self, $permsgstatus) = @_;
+  my $domain = undef;
 
   return 0 if $self->{main}->{local_tests_only}; # in case plugins ever get called
 
@@ -49,32 +50,36 @@ sub schucheckmx_ismx {
   # avoid FPs (and wasted processing) by not checking when all_trusted
   return 0 if $permsgstatus->check_all_trusted;
 
-  # next we need the recipient domain's MX records... who's the recipient
-  foreach my $from ($permsgstatus->all_from_addrs) {
-
-    my( $user, $domain ) = split( "@", $from );
-    dbg("SCHUCHECKMX_ISMX: going to test domain $domain");
-
-    if ( ! $domain ){
-      dbg("SCHUCHECKMX_ISMX: Couldn't find sender domain in permsgstatus->all_from_addrs");
-      return 0;
-    }
-
-    my $res = Net::DNS::Resolver->new;
-    my $packet = $res->query( $domain, 'MX' );
-
-    if(  ! $packet ){
-      dbg("SCHUCHECKMX_ISMX: Couldn't find MX record for $domain");
-      return 1;
-    }
-
+  if ( my $from = $permsgstatus->get("Return-Path:addr",undef) ){
+    ( my $user, $domain ) = split( "@", $from );
+    dbg("SCHUCHECKMX_ISMX: found $domain in Return-Path");
+  } elsif( my $from = $permsgstatus->get("From:addr",undef) ){
+    my $from = $permsgstatus->get("From:addr",undef);
+    ( my $user, $domain ) = split( "@", $from );
+    dbg("SCHUCHECKMX_ISMX: found $domain in From");
+  } else {
+    dbg("SCHUCHECKMX_ISMX: Couldn't find sender domain in Return-Path or From headers");
+    return 0;
   }
 
-  return 0;
+  dbg("SCHUCHECKMX_ISMX: going to test domain $domain");
+
+  my $res = Net::DNS::Resolver->new;
+  my $packet = $res->query( $domain, 'MX' );
+
+  if(  ! $packet ){
+    dbg("SCHUCHECKMX_ISMX: Couldn't find MX record for $domain");
+    return 1;
+  } else {
+    dbg("SCHUCHECKMX_ISMX: Found MX record for $domain");
+    return 0;
+  }
+
 }
 
 sub schucheckmx_smtpping {
   my ($self, $permsgstatus) = @_;
+  my $domain = undef;
   my $smtp;
   my $dbh;
 
@@ -97,77 +102,76 @@ sub schucheckmx_smtpping {
   # whack any old stuff
   $dbh->do("delete from schucheckmx where timestamp < date( 'now','-1 day');") or dbg("SCHUCHECKMX_SMTPPING: Found database error: " .  $DBI::errstr );
 
-  # next we need the recipient domain's MX records... who's the recipient
-  foreach my $from ($permsgstatus->all_from_addrs) {
+  if ( my $from = $permsgstatus->get("Return-Path:addr",undef) ){
+    ( my $user, $domain ) = split( "@", $from );
+    dbg("SCHUCHECKMX_SMTPPING: found $domain in Return-Path");
+  } elsif( my $from = $permsgstatus->get("From:addr",undef) ){
+    my $from = $permsgstatus->get("From:addr",undef);
+    ( my $user, $domain ) = split( "@", $from );
+    dbg("SCHUCHECKMX_SMTPPING: found $domain in From");
+  } else {
+    dbg("SCHUCHECKMX_SMTPPING: Couldn't find sender domain in Return-Path or From headers");
+    return 0;
+  }
 
-    my( $user, $domain ) = split( "@", $from );
-    dbg("SCHUCHECKMX_SMTPPING: going to test domain $domain");
+  my $result =  $dbh->selectrow_hashref( "select * from schucheckmx where domain = ?", {}, ( $domain ) ) ;
 
-    if ( ! $domain ){
-      dbg("SCHUCHECKMX_SMTPPING: Couldn't find sender domain in permsgstatus->all_from_addrs");
+  if( $result ) {
+
+    if( $result->{listeningsmtp} ) {
+      dbg("SCHUCHECKMX_SMTPPING: found $domain cached in database, and listening");
       return 0;
+    } else {
+      dbg("SCHUCHECKMX_SMTPPING: found $domain cached in database, and NOT listening");
+      return 1;
     }
 
-    my $result =  $dbh->selectrow_hashref( "select * from schucheckmx where domain = ?", {}, ( $domain ) ) ;
+  } 
 
-    if( $result ) {
+  my $res = Net::DNS::Resolver->new;
+  my $packet = $res->query( $domain, 'MX' );
 
-      if( $result->{listeningsmtp} ) {
-        dbg("SCHUCHECKMX_SMTPPING: found $domain cached in database, and listening");
-        return 0;
-      } else {
-        dbg("SCHUCHECKMX_SMTPPING: found $domain cached in database, and NOT listening");
-        return 1;
-      }
+  if( $packet ){
 
-    } 
+    foreach my $answer ( grep { $_->type eq "MX" } $packet->answer){
 
-    my $res = Net::DNS::Resolver->new;
-    my $packet = $res->query( $domain, 'MX' );
+      # untaint
+      $answer->exchange =~ /^(.*)$/;
+      my $mx = $1;
 
-    if( $packet ){
+      dbg("SCHUCHECKMX_SMTPPING: DNS returned '$mx' for $domain");
 
-      foreach my $answer ( grep { $_->type eq "MX" } $packet->answer){
-
-        # untaint
-        $answer->exchange =~ /^(.*)$/;
-        my $mx = $1;
-
-        dbg("SCHUCHECKMX_SMTPPING: DNS returned '$mx' for $domain");
-
-        if( $smtp = Net::SMTP->new( $mx, Hello => $HELO, Timeout => 60 ) ){
-          dbg("SCHUCHECKMX_SMTPPING: Sent HELO $HELO got banner " .$smtp->banner);
-          my $sth = $dbh->prepare( "insert into schucheckmx (domain, listeningsmtp) values (?, ?)" );
-          $sth->execute( $domain, 1) or dbg("SCHUCHECKMX_SMTPPING: Found database error: " .  $DBI::errstr );
-          $smtp->quit;
-          return 0;
-        } else {
-          dbg("SCHUCHECKMX_SMTPPING: no smtp server listening");
-        }
-
-      }
-
-      dbg("SCHUCHECKMX_SMTPPING: Could not get a banner from any of the smtp servers");
-      my $sth = $dbh->prepare( "insert into schucheckmx (domain, listeningsmtp) values (?, ?)" );
-      $sth->execute( $domain, 0) or dbg("SCHUCHECKMX_SMTPPING: Found database error: " .  $DBI::errstr );
-      return 1;
-
-    } else {
-
-
-      if( $smtp = Net::SMTP->new( $domain, Hello => $HELO, Timeout => 60 ) ){
-        dbg("SCHUCHECKMX_SMTPPING: sent HELO $HELO got banner " .$smtp->banner);
-        $smtp->quit;
+      if( $smtp = Net::SMTP->new( $mx, Hello => $HELO, Timeout => 60 ) ){
+        dbg("SCHUCHECKMX_SMTPPING: Sent HELO $HELO got banner " .$smtp->banner);
         my $sth = $dbh->prepare( "insert into schucheckmx (domain, listeningsmtp) values (?, ?)" );
         $sth->execute( $domain, 1) or dbg("SCHUCHECKMX_SMTPPING: Found database error: " .  $DBI::errstr );
+        $smtp->quit;
         return 0;
       } else {
-        my $sth = $dbh->prepare( "insert into schucheckmx (domain, listeningsmtp) values (?, ?)" );
-        $sth->execute( $domain, 0) or dbg("SCHUCHECKMX_SMTPPING: Found database error: " .  $DBI::errstr );
         dbg("SCHUCHECKMX_SMTPPING: no smtp server listening");
-        return 1;
       }
 
+    }
+
+    dbg("SCHUCHECKMX_SMTPPING: Could not get a banner from any of the smtp servers");
+    my $sth = $dbh->prepare( "insert into schucheckmx (domain, listeningsmtp) values (?, ?)" );
+    $sth->execute( $domain, 0) or dbg("SCHUCHECKMX_SMTPPING: Found database error: " .  $DBI::errstr );
+    return 1;
+
+  } else {
+
+
+    if( $smtp = Net::SMTP->new( $domain, Hello => $HELO, Timeout => 60 ) ){
+      dbg("SCHUCHECKMX_SMTPPING: sent HELO $HELO got banner " .$smtp->banner);
+      $smtp->quit;
+      my $sth = $dbh->prepare( "insert into schucheckmx (domain, listeningsmtp) values (?, ?)" );
+      $sth->execute( $domain, 1) or dbg("SCHUCHECKMX_SMTPPING: Found database error: " .  $DBI::errstr );
+      return 0;
+    } else {
+      my $sth = $dbh->prepare( "insert into schucheckmx (domain, listeningsmtp) values (?, ?)" );
+      $sth->execute( $domain, 0) or dbg("SCHUCHECKMX_SMTPPING: Found database error: " .  $DBI::errstr );
+      dbg("SCHUCHECKMX_SMTPPING: no smtp server listening");
+      return 1;
     }
 
   }

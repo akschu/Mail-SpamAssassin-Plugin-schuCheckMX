@@ -8,5 +8,5 @@ score           SCHUCHECKMX_MXRECORD 0.5
 header          SCHUCHECKMX_SMTPPING eval:schucheckmx_smtpping()
 describe        SCHUCHECKMX_SMTPPING The recipient domain isn't listening on port 25.
 tflags          SCHUCHECKMX_SMTPPING net
-score           SCHUCHECKMX_SMTPPING 2.5
+score           SCHUCHECKMX_SMTPPING 4.0
 
